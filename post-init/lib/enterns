@@ -1,0 +1,23 @@
+#!/bin/bash
+# golden-image replacement for Podman's /usr/local/bin/enterns
+# (pkg/machine/wsl/declares.go, const enterns).
+#
+# root:     unchanged behaviour. Podman's StopVM runs
+#           "wsl -u root -d <dist> /usr/local/bin/enterns systemctl exit 0".
+# non-root: Podman's version runs "sudo nsenter ... sudo -u $USER <args>",
+#           which needs unrestricted sudo. Here a non-root caller may only get
+#           a login shell, through the argument-free helper allowed in
+#           /etc/sudoers.d/10-golden-image.
+# Same detection as Podman (declares.go sysdpid) on purpose.
+# shellcheck disable=SC2009
+SYSDPID=$(ps -eo cmd,pid | grep -m 1 '^/lib/systemd/systemd' | awk '{print $2}')
+if [ -n "$SYSDPID" ] && [ "$SYSDPID" != "1" ]; then
+    if [ "$UID" = "0" ]; then
+        exec nsenter -m -p -t "$SYSDPID" "--wd=$PWD" "$@"
+    fi
+    if [ "$#" != "0" ]; then
+        echo "enterns: running commands through sudo is disabled by policy; use 'podman machine ssh'" >&2
+        exit 1
+    fi
+    exec sudo -n /usr/local/libexec/golden-image/enterns-user
+fi

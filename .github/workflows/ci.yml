@@ -1,0 +1,40 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck post-init/harden.sh post-init/lib/* build/*.sh build/files/*.sh tests/linux/*.sh -e SC2016
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $files = Get-ChildItem -Recurse -Include *.ps1 -Path post-init, compliance, tests
+          $issues = $files | ForEach-Object {
+            Invoke-ScriptAnalyzer -Path $_.FullName -Severity Error, Warning `
+              -ExcludeRule PSAvoidUsingWriteHost, PSUseShouldProcessForStateChangingFunctions
+          }
+          $issues | Format-Table -AutoSize | Out-String | Write-Host
+          if (@($issues | Where-Object Severity -eq 'Error').Count) { exit 1 }
+
+  offline-build-test:
+    # Uses a stand-in Fedora base (tests/linux/make-test-base.sh), not the real
+    # machine OS, so it checks the build mechanics and harden.sh logic only.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y zstd podman jq
+      - name: test CA
+        run: openssl req -x509 -newkey rsa:2048 -nodes -keyout /dev/null -out /tmp/ca.pem -subj "/CN=CI Test Root" -days 2
+      - name: build
+        run: |
+          sudo tests/linux/make-test-base.sh /tmp/base.tar.zst podman
+          sudo CA_FILE=/tmp/ca.pem build/build.sh --engine podman --base-tar /tmp/base.tar.zst --out /tmp/out
+      - name: harden.sh against simulated podman machine init
+        run: sudo tests/linux/test-harden.sh /tmp/out/podman-wsl-golden-*.tar.zst podman

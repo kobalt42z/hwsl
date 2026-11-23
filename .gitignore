@@ -1,0 +1,4 @@
+out/
+*.tar
+*.tar.zst
+tests/acceptance-result.json

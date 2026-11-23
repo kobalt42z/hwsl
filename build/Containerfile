@@ -1,0 +1,16 @@
+# Golden image layer on top of the official Podman machine OS (WSL flavour).
+# Built by build/build.sh - do not run directly; build.sh prepares the context
+# (resolved config, CA, repo file) and imports the base rootfs as BASE_IMAGE.
+ARG BASE_IMAGE=localhost/podman-wsl-base:latest
+FROM ${BASE_IMAGE}
+
+ARG CA_NAME=corporate-root-ca
+
+COPY config.env version /etc/golden-image/
+COPY harden.sh enterns enterns-user /usr/local/libexec/golden-image/
+COPY ca.crt /etc/pki/ca-trust/source/anchors/${CA_NAME}.crt
+COPY golden-mirror.repo image-prepare.sh /tmp/golden-build/
+
+RUN /bin/bash /tmp/golden-build/image-prepare.sh \
+ && /usr/local/libexec/golden-image/harden.sh --stage build \
+ && rm -rf /tmp/golden-build
