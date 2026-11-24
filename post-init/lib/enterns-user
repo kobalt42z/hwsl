@@ -1,0 +1,15 @@
+#!/bin/bash
+# golden-image: the ONLY command the machine user may run through sudo.
+# It takes no arguments (sudoers rule ends in ""), and opens a login shell for
+# the machine user inside the PID/mount namespace where Podman's systemd runs.
+set -euo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+# shellcheck source=/dev/null
+source /etc/golden-image/config.env
+# Same detection as Podman (declares.go sysdpid) on purpose.
+# shellcheck disable=SC2009
+SYSDPID=$(ps -eo cmd,pid | grep -m 1 '^/lib/systemd/systemd' | awk '{print $2}' || true)
+if [[ -z "$SYSDPID" || "$SYSDPID" == "1" ]]; then
+    exit 0
+fi
+exec nsenter -m -p -t "$SYSDPID" "--wd=/home/${MACHINE_USER}" su -l "${MACHINE_USER}"
