@@ -24,7 +24,7 @@ if ($Action -eq 'Install') {
     }
     $script = Join-Path $InstallDir 'Test-WslCompliance.ps1'
     $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
-    $action = New-ScheduledTaskAction -Execute $ps `
+    $taskAction = New-ScheduledTaskAction -Execute $ps `
         -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -Scheduled"
     # Runs for every interactive user (BUILTIN\Users), in that user's context:
     # WSL distros and Podman machines are per user.
@@ -34,7 +34,7 @@ if ($Action -eq 'Install') {
     $every4h = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Hours 4)
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -MultipleInstances IgnoreNew
-    Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Action $action -Principal $principal `
+    Register-ScheduledTask -TaskName $taskName -TaskPath $taskPath -Action $taskAction -Principal $principal `
         -Trigger @($atLogon, $every4h) -Settings $settings `
         -Description 'Checks the Podman WSL golden image (registered distros, versions, manifest, self-heal repairs). Results: %LOCALAPPDATA%\PodmanGoldenImage\compliance.json and the Application event log.' `
         -Force | Out-Null
