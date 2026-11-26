@@ -24,10 +24,13 @@ Where a requirement conflicts with Podman, it is listed under
 | `build/publish.sh` | Uploads to an Artifactory generic repo, or pushes a machine-os style OCI artifact |
 | `post-init/harden.sh` | Runs as root after `podman machine init`. Idempotent. Baked in at `/usr/local/libexec/golden-image/harden.sh` |
 | `post-init/lib/enterns*` | Replacement for Podman's `enterns`, and the single sudo-allowed helper |
-| `post-init/Invoke-Harden.ps1` | Windows/SCCM wrapper: init, then harden, then restart, then verify, then store a reference manifest |
+| `post-init/lib/selfheal.sh`, `golden-image-selfheal.service` | Boot-time self-heal baked into the image (hardening, profile detection, repair log) |
+| `post-init/Invoke-Harden.ps1` | Optional repair/manual tool: init, then harden with explicit settings, then restart, then verify |
+| `installer/` | Offline setup.exe (WiX Burn bundle: pinned Podman MSI + optional WSL MSI + `PodmanGoldenImage.msi`) |
 | `compliance/Test-WslCompliance.ps1` | Windows compliance check. Outputs JSON and an exit code |
 | `tests/acceptance.ps1` | Acceptance criteria on a Windows dev PC |
-| `tests/linux/` | Offline Linux tests (simulated `podman machine init` + `harden.sh`), also run in CI |
+| `tests/linux/` | Offline Linux tests (simulated `podman machine init`, `harden.sh`, self-heal), also run in CI |
+| `tests/windows/Test-Installer.ps1` | Silent install/uninstall test of the setup, run in CI on a Windows runner |
 
 ## Configuration (placeholders)
 
@@ -97,54 +100,149 @@ Podman without `--image` pulls `quay.io/podman/machine-os`, which there is no in
 reach. Either always pass `--image`, or set the default in the Windows
 `%APPDATA%\containers\containers.conf` under `[machine] image = "docker://…"`.
 
-## Install (SCCM)
+## Installer (offline, self-contained)
 
-Deploy in the **logged-on user's context**. Podman machines and WSL distros are per user,
-and the script refuses to run as SYSTEM.
+`installer/build-installer.ps1` turns the golden image into one file,
+`podman-wsl-golden-<ver>-setup.exe`, that installs everything with no network access.
+
+### Why a WiX Burn bundle (setup.exe) and not a single MSI
+
+- **Podman ships as an MSI.** Since 5.x, the official Podman for Windows installer is an
+  MSI (`podman-installer-windows-amd64.msi`, built with WiX 5 from
+  `contrib/win-installer`). One MSI can't install another MSI, and repackaging Podman's
+  files into our own MSI would mean shipping unsigned, modified Podman binaries.
+- **Burn is WiX's chainer.** It runs several MSIs in order, as one install, one uninstall
+  and one upgrade, from one signed `.exe` with every payload embedded. It supports
+  `/quiet /norestart /log`, so SCCM, Intune or a USB stick all work the same way.
+- **Each part stays separate.** The bundle chains the official signed Podman MSI
+  unchanged, an optional Microsoft WSL MSI, and our own `PodmanGoldenImage.msi`. Admins
+  who prefer it can deploy the three MSIs separately; the build outputs ours next to the
+  setup.
+
+### What it installs
+
+| Package | Contents |
+|---|---|
+| Microsoft WSL MSI (optional, `-WslMsi`) | For PCs without the Store/inbox WSL. Never uninstalled by the bundle (`Permanent`) |
+| Podman MSI (pinned, official) | Per-machine (`ALLUSERS=1`), provider `wsl`. Checked against the release `shasums` (or `-PodmanMsiSha256`) and Authenticode at build time |
+| `PodmanGoldenImage.msi` | `%ProgramData%\PodmanGoldenImage\podman-wsl-golden.tar.zst` (users can read, not write); `%ProgramData%\containers\containers.conf.d\50-podman-golden-image.conf` with `[machine] image='…'` and `provider="wsl"`, so a **plain `podman machine init` uses the golden image**; `C:\Program Files\PodmanGoldenImage\` with the compliance script, `Invoke-Harden.ps1` and `bundle-info.json` (expected versions and hashes); the scheduled task **Podman Golden Image Compliance** and the `PodmanGoldenImage` event log source |
+
+Podman for Windows reads `%ProgramData%\containers\containers.conf.d\*` machine-wide
+(`containers/common` `config_windows.go`). The MSI locks that folder to SYSTEM and
+Administrators for writing, so users can't add a drop-in there.
+
+### Build
+
+On a Windows agent with the .NET SDK and WiX 5.0.2 (the same toolchain Podman uses):
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File post-init\Invoke-Harden.ps1 `
-  -ImagePath "\\sccm\pkg\podman-wsl-golden-5.8.9-1.tar.zst" `
-  -ExpectedSha256 <sha from .sha256>
+dotnet tool install --global wix --version 5.0.2
+wix extension add -g WixToolset.Util.wixext/5.0.2
+wix extension add -g WixToolset.Bal.wixext/5.0.2
+
+# online build agent: fetches the pinned Podman MSI and verifies it
+.\installer\build-installer.ps1 -GoldenImage .\out\podman-wsl-golden-5.8.9-1.tar.zst
+
+# air-gapped build agent: everything local, signatures required
+.\installer\build-installer.ps1 -GoldenImage .\out\podman-wsl-golden-5.8.9-1.tar.zst `
+  -PodmanMsi .\deps\podman-installer-windows-amd64.msi -PodmanMsiSha256 <sha> `
+  -WslMsi .\deps\wsl.<ver>.x64.msi -WslMsiSha256 <sha> -RequireSignature
 ```
 
-The script:
-1. checks that the Podman client matches the image (`-ExpectedPodmanVersion 5.8`)
-2. runs `podman machine init --image …` (`-Force` replaces an existing machine; this deletes its containers)
-3. creates the approved Windows folders if they don't exist, and finds VS 2026 with `vswhere`
-4. runs `wsl -d podman-machine-default -u root --exec …/harden.sh --win-user … --profile … --appdata … --vs-root …` (`--exec` means no shell, so backslashes and spaces arrive verbatim)
-5. terminates the distro and runs `podman machine start`
-6. runs `harden.sh --verify`, then copies the manifest to `%LOCALAPPDATA%\GoldenImage\<distro>\manifest.sha256` and writes `install.json`
+The output goes to `out\installer\`: `podman-wsl-golden-<ver>-setup.exe` (+ `.sha256`, `.json`)
+and `PodmanGoldenImage-<ver>.msi`. Sign the setup with your code-signing certificate before
+you distribute it (`wix burn detach` / `signtool` / `wix burn reattach` for the engine, then
+the bundle).
 
-Exit codes: 0 OK, 1 failure, 2 precondition not met. There is a log next to the reference manifest.
+### Install
+
+```powershell
+podman-wsl-golden-5.8.9-1-setup.exe /quiet /norestart /log C:\Windows\Temp\podman-golden.log
+```
+
+This runs as admin or SYSTEM, once per PC. There's no per-user step: each developer runs
+
+```powershell
+podman machine init      # uses the golden image (machine-wide default)
+podman machine start     # first boot: the self-heal hardens the machine
+```
+
+Prerequisite: the Windows features *Virtual Machine Platform* (and, for inbox WSL,
+*Windows Subsystem for Linux*) must be enabled. They work offline, need a reboot, and are
+usually set in the base OS image:
+`dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart`.
+
+### Self-heal (in the image)
+
+`golden-image-selfheal.service` is baked into the image and runs on every boot of Podman's
+systemd, before `sshd` and the Podman socket. Podman's `machine init` doesn't remove it, so
+any machine created from the golden image is hardened on its first start, even if nobody
+ran `harden.sh`.
+
+1. If the manifest is valid, nothing is changed.
+2. If the manifest is missing (first boot) or doesn't match (tampering), it records a
+   `REPAIR` in `/var/log/golden-image/repairs.log` and runs `harden.sh`. Unknown files in
+   `sudoers.d`, `registries.conf.d` and `containers.conf.d` are moved to
+   `/var/lib/golden-image/quarantine/`.
+3. The mounts reuse `/etc/golden-image/host.env` from the last run. If it doesn't exist,
+   the unit **detects the owner's Windows profile**: Podman puts the machine's public key
+   into `authorized_keys`, and the same key is in
+   `C:\Users\<name>\.local\share\containers\podman\machine\machine.pub`. `C:\Users` is
+   mounted read-only for a moment and unmounted again. VS 2026 is found the same way. If
+   no profile matches (or two do), it **fails closed**: everything is hardened, no Windows
+   folder is mounted, and detection is retried on the next boot.
+4. On the first boot, Podman's `wsl.conf` is still in effect (automount and interop on).
+   The unit unmounts unapproved Windows mounts, mounts the approved ones and disables the
+   interop handler right away. The hardened `wsl.conf` applies fully from the next start.
+
+So `--win-user` is optional. Use `Invoke-Harden.ps1` (or `harden.sh --profile … --appdata …`)
+only when detection can't work, for example with redirected AppData.
 
 ## Upgrade
 
-- **New golden image** (new CA, new base, config change): bump `GOLDEN_VERSION`, build,
-  publish, and redeploy with `-Force`. A WSL machine can't be upgraded in place. Containers
-  and images in the old machine are lost, so tell developers to push anything they need.
-- **Podman for Windows minor upgrade** (e.g. 5.8.x → 5.8.y): the existing distro is not
-  re-provisioned, so the manifest stays valid. Run the compliance script afterwards.
-  For a new minor *series* (5.9), re-read `pkg/machine/wsl` for that tag
+- **New installer version** (new golden image, a new Podman patch release, a new CA): bump
+  `GOLDEN_VERSION`, build the image and the installer, and deploy the new setup. The
+  bundle upgrades Podman and the golden MSI in place. Existing machines keep running with
+  the image they were created from, and compliance reports `golden.version` as WARN until
+  the developer recreates the machine (`podman machine rm` + `init`). Recreating deletes
+  that machine's containers and images.
+- **New Podman minor series** (5.9): re-read `pkg/machine/wsl` for that tag
   (see [docs/podman-provisioning.md](docs/podman-provisioning.md)), rebuild on
-  `machine-os:5.9`, and redeploy.
-- After any sanctioned in-distro change (`podman machine set --rootful`,
-  `dnf update ca-certificates`), re-run `harden.sh` as root, which regenerates the
-  manifest, and refresh the reference copy by re-running `Invoke-Harden.ps1` without `-Force`.
+  `machine-os:5.9`, run the tests, then release as above.
+- **A developer upgrades Podman on their own**: the existing distro is not re-provisioned,
+  so the hardening stays. Compliance FAILs `podman.version`, and redeploying the setup
+  restores the pinned version.
+- After a sanctioned in-distro change (`podman machine set --rootful`,
+  `dnf update ca-certificates`), the next start's self-heal regenerates the manifest. It
+  shows up once as a repair.
 
 ## Compliance
 
-```powershell
-compliance\Test-WslCompliance.ps1 -ExpectedGoldenVersion 5.8.9-1 -OutFile C:\ProgramData\GoldenImage\compliance.json
-```
+The installed task runs `Test-WslCompliance.ps1 -Scheduled` for every logged-on user, at
+logon (+5 min) and every 4 hours. It writes `%LOCALAPPDATA%\PodmanGoldenImage\compliance.json`
+and an Application event (source `PodmanGoldenImage`, ID 1000 PASS, 1001 FAIL, 1002 ERROR,
+1003 WARN), which your SIEM or Intune can collect. `-Scheduled` never starts a stopped
+machine.
 
-The script checks the following: only approved distros are registered in Lxss (HKCU, or
-all loaded user hives with `-AllUsers`, which runs only the registry checks when run as
-SYSTEM); all distros are WSL 2; the `wsl --version` minimum; the Podman client version; the
-golden version; live file hashes against the in-distro manifest; the in-distro manifest
-against the reference copy outside the distro; and no new files in watched dirs (for
-example an extra `sudoers.d` file). The output is JSON, with exit code 0 for PASS, 1 for
-FAIL and 2 for error.
+The checks are:
+- only approved distros are registered (Lxss), and all are WSL 2, with the minimum WSL version;
+- the Podman client matches the bundled version, and no per-user `containers.conf`
+  overrides the default image (WARN);
+- the machine was built from the golden image (FAIL if not, which catches
+  `init --image <other>`), and from the installed version (WARN if older);
+- live hashes match the manifest, and `harden.sh --verify` passes (it also catches new files);
+- an optional reference manifest outside the distro matches;
+- any self-heal repairs since the last run (WARN, with details).
+
+Exit codes are 0 PASS, 1 FAIL, 2 ERROR and 3 WARN. Run it by hand as
+`& "C:\Program Files\PodmanGoldenImage\Test-WslCompliance.ps1"`.
+
+## Repair / manual install (`Invoke-Harden.ps1`)
+
+`Invoke-Harden.ps1` is optional now. It runs `podman machine init` (with the installed image
+by default), then `harden.sh` with explicit mount settings, then restarts, verifies and stores
+a reference manifest under `%LOCALAPPDATA%\GoldenImage\<distro>\`. Run it in the user's
+context; it refuses SYSTEM. `-Force` recreates the machine.
 
 ## Credentials (Artifactory)
 
@@ -242,6 +340,20 @@ marked, and so are the parts not yet confirmed on Windows.
   manifest then needs a refresh (re-run `harden.sh`).
 - `podman machine set --rootful` / `--user-mode-networking` / an SSH port change rewrite
   files that Podman owns. Expect a compliance FAIL until `harden.sh` is re-run.
+- **Foreign images can't be blocked, only detected.** `podman machine init --image <other>`
+  and `wsl --import` are user actions, and Podman has no image allow-list. A user's own
+  `%APPDATA%\containers\containers.conf` can also override the default image. The
+  compliance check FAILs a machine that isn't a golden image, and WARNs about the override.
+  Blocking internet egress keeps the golden image the only one available.
+- **There's a window before the first `podman machine start`.** The self-heal runs inside
+  Podman's systemd. A distro that is entered with `wsl -d podman-machine-default` right
+  after `init`, before the first start, still has Podman's `wsl.conf` (automount on) until
+  it is started once by Podman.
+- **Profile detection relies on Podman's key location**
+  (`%USERPROFILE%\.local\share\containers\podman\machine\machine.pub`, from the 5.8.9 source)
+  and on root being able to mount `C:\Users` read-only with drvfs while automount is off.
+  Both need to be confirmed on a real PC (see manual steps). A redirected `APPDATA`, or a
+  profile folder that differs from what Podman resolves, needs `Invoke-Harden.ps1 -AppDataPath …`.
 - `harden.sh` expects the Podman 5.8 file layout. Re-check it for other minor series.
 - The PowerShell scripts target Windows PowerShell 5.1 and PowerShell 7. CI runs
   PSScriptAnalyzer on them, but they haven't been executed on Windows yet.
@@ -267,7 +379,12 @@ automates the rest.
    sets `DOTNET_USE_POLLING_FILE_WATCHER` in its generated compose override.
 4. **Podman minor upgrade**: upgrade Podman for Windows, then run
    `tests\acceptance.ps1 -SkipInstall`. AC5 must still PASS.
-5. **Conflict 1, option B** (only if you want to confirm it): set `WSL_BOOT_SYSTEMD=true`
+5. **Installer and self-heal on a real PC**: install the setup silently, run
+   `podman machine init` and `podman machine start` as a developer, then check
+   `/var/log/golden-image/selfheal.log` (`wsl -d podman-machine-default -u root cat …`). It
+   should show the detected profile, and `findmnt -t 9p` should list only the approved
+   mounts. Then run `podman machine stop` and `start`, and check that no repair is logged.
+6. **Conflict 1, option B** (only if you want to confirm it): set `WSL_BOOT_SYSTEMD=true`
    on a test build and check that `podman machine start` fails as described.
 
 ## Tests

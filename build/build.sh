@@ -130,7 +130,8 @@ EOF
 
 cp "$ca_path" "$ctx/ca.crt"
 cp "$here/Containerfile" "$here/files/image-prepare.sh" "$ctx/"
-cp "$root/post-init/harden.sh" "$root/post-init/lib/enterns" "$root/post-init/lib/enterns-user" "$ctx/"
+cp "$root/post-init/harden.sh" "$root/post-init/lib/enterns" "$root/post-init/lib/enterns-user" \
+   "$root/post-init/lib/selfheal.sh" "$root/post-init/lib/golden-image-selfheal.service" "$ctx/"
 
 # --- 4. build -----------------------------------------------------------------
 img="localhost/podman-wsl-golden:${GOLDEN_VERSION}"

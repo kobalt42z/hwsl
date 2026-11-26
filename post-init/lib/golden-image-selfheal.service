@@ -1,0 +1,18 @@
+# Baked into the golden image. Re-applies the hardening at every boot of
+# Podman's systemd (podman machine start), including the first boot after a
+# fresh `podman machine init`. See /usr/local/libexec/golden-image/selfheal.sh.
+[Unit]
+Description=Golden image: verify and re-apply WSL hardening
+DefaultDependencies=no
+After=local-fs.target systemd-tmpfiles-setup.service
+Before=sshd.service podman.socket multi-user.target
+ConditionPathExists=/etc/containers/podman-machine
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/golden-image/selfheal.sh
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

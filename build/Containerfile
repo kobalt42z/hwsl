@@ -7,7 +7,8 @@ FROM ${BASE_IMAGE}
 ARG CA_NAME=corporate-root-ca
 
 COPY config.env version /etc/golden-image/
-COPY harden.sh enterns enterns-user /usr/local/libexec/golden-image/
+COPY harden.sh enterns enterns-user selfheal.sh /usr/local/libexec/golden-image/
+COPY golden-image-selfheal.service /etc/systemd/system/
 COPY ca.crt /etc/pki/ca-trust/source/anchors/${CA_NAME}.crt
 COPY golden-mirror.repo image-prepare.sh /tmp/golden-build/
 
