@@ -21,6 +21,21 @@ $tools = Join-Path $env:ProgramFiles 'PodmanGoldenImage'
 # --- install ---------------------------------------------------------------------
 $p = Start-Process -FilePath $Setup -ArgumentList '/quiet', '/norestart', '/log', (Join-Path $logDir 'install.log') -Wait -PassThru
 Test-That "setup /quiet exit code $($p.ExitCode) is 0 or 3010" ($p.ExitCode -in 0, 3010)
+if ($p.ExitCode -notin 0, 3010) {
+    # Show why: Burn log errors, then the context of the failing MSI action.
+    foreach ($log in Get-ChildItem -Path $logDir -Filter 'install*.log') {
+        Write-Host "===== $($log.Name)"
+        $lines = @(Get-Content -LiteralPath $log.FullName)
+        $hits = @(for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match 'Return value 3|error 0x|Error \d{4}|CustomAction .* returned|failed') { $i } })
+        foreach ($i in ($hits | Select-Object -First 15)) {
+            $from = [Math]::Max(0, $i - 15)
+            $lines[$from..$i] | ForEach-Object { Write-Host $_ }
+            Write-Host '-----'
+        }
+    }
+    throw "setup failed with exit code $($p.ExitCode)"
+}
 
 Test-That 'golden image in ProgramData' (Test-Path -LiteralPath $image)
 Test-That 'compliance tools installed' (Test-Path -LiteralPath (Join-Path $tools 'Test-WslCompliance.ps1'))
