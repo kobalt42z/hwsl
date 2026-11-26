@@ -138,7 +138,7 @@ On a Windows agent with the .NET SDK and WiX 5.0.2 (the same toolchain Podman us
 ```powershell
 dotnet tool install --global wix --version 5.0.2
 wix extension add -g WixToolset.Util.wixext/5.0.2
-wix extension add -g WixToolset.Bal.wixext/5.0.2
+wix extension add -g WixToolset.BootstrapperApplications.wixext/5.0.2
 
 # online build agent: fetches the pinned Podman MSI and verifies it
 .\installer\build-installer.ps1 -GoldenImage .\out\podman-wsl-golden-5.8.9-1.tar.zst

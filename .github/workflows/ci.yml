@@ -66,7 +66,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           dotnet tool install --global wix --version 5.0.2
           if ($LASTEXITCODE -ne 0) { throw "dotnet tool install exited with $LASTEXITCODE" }
-          foreach ($ext in 'WixToolset.Util.wixext', 'WixToolset.Bal.wixext') {
+          foreach ($ext in 'WixToolset.Util.wixext', 'WixToolset.BootstrapperApplications.wixext') {
             $dll = Join-Path $HOME ".wix\extensions\$ext\5.0.2\wixext5\$ext.dll"
             for ($i = 1; $i -le 3 -and -not (Test-Path $dll); $i++) {
               wix extension add -g "$ext/5.0.2"

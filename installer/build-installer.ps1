@@ -143,7 +143,7 @@ Invoke-Wix @('build', '-arch', 'x64', '-ext', 'WixToolset.Util.wixext',
     (Join-Path $PSScriptRoot 'wix\GoldenImage.wxs'), '-o', $goldenMsi)
 
 $setup = Join-Path $OutDir "podman-wsl-golden-$goldenVersion-setup.exe"
-$bundleArgs = @('build', '-arch', 'x64', '-ext', 'WixToolset.Bal.wixext',
+$bundleArgs = @('build', '-arch', 'x64', '-ext', 'WixToolset.BootstrapperApplications.wixext',
     '-d', "Version=$msiVersion", '-d', "PodmanMsi=$((Resolve-Path $PodmanMsi).ProviderPath)", '-d', "GoldenMsi=$goldenMsi")
 if ($WslMsi) { $bundleArgs += @('-d', "WslMsi=$((Resolve-Path $WslMsi).ProviderPath)") }
 $bundleArgs += @((Join-Path $PSScriptRoot 'wix\Bundle.wxs'), '-o', $setup)
