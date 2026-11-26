@@ -20,7 +20,7 @@
       <MsiPackage Id="Wsl" SourceFile="$(var.WslMsi)" Vital="yes" Permanent="yes" Visible="yes" />
 <?endif?>
       <MsiPackage Id="Podman" SourceFile="$(var.PodmanMsi)" Vital="yes" ForcePerMachine="yes">
-        <MsiProperty Name="ALLUSERS" Value="1" />
+        <!-- ForcePerMachine makes Burn pass ALLUSERS=1 (it may not be authored here). -->
         <MsiProperty Name="MACHINE_PROVIDER" Value="wsl" />
       </MsiPackage>
       <MsiPackage Id="GoldenImage" SourceFile="$(var.GoldenMsi)" Vital="yes" />
