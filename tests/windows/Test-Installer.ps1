@@ -71,7 +71,10 @@ if ($podman) {
     $imageLines = @($help -split "`n" | Where-Object { $_ -like '*image*' })
     if ($imageLines.Count -eq 0) { $imageLines = @($help -split "`n" | Select-Object -First 20) }
     $imageLines | ForEach-Object { Write-Host "  help: $_" }
-    Test-That 'podman machine init defaults to the golden image' ($help -match [regex]::Escape($image))
+    # --help prints the default as a Go-quoted string, so backslashes appear doubled.
+    $quoted = $image.Replace('\', '\\')
+    Test-That 'podman machine init defaults to the golden image' (
+        $help.Contains($image) -or $help.Contains($quoted))
 }
 
 # --- uninstall -------------------------------------------------------------------
