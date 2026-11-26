@@ -6,10 +6,13 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][ValidateSet('Install', 'Uninstall')][string]$Action,
-    [string]$InstallDir = $PSScriptRoot
+    [string]$InstallDir
 )
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+# Not a param default: Windows PowerShell 5.1 leaves $PSScriptRoot empty there when
+# started by the MSI custom action.
+if (-not $InstallDir) { $InstallDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 
 $taskName = 'Podman Golden Image Compliance'
 $taskPath = '\PodmanGoldenImage\'
@@ -20,7 +23,7 @@ if ($Action -eq 'Install') {
         [System.Diagnostics.EventLog]::CreateEventSource($source, 'Application')
     }
     $script = Join-Path $InstallDir 'Test-WslCompliance.ps1'
-    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $ps = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell\v1.0\powershell.exe'
     $action = New-ScheduledTaskAction -Execute $ps `
         -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`" -Scheduled"
     # Runs for every interactive user (BUILTIN\Users), in that user's context:
