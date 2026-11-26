@@ -62,9 +62,15 @@ Test-That 'event log source registered' ([System.Diagnostics.EventLog]::SourceEx
 $podman = @("$env:ProgramFiles\RedHat\Podman\podman.exe", "$env:ProgramFiles\Podman\podman.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
 Test-That 'Podman installed per-machine' ($null -ne $podman)
 if ($podman) {
-    $ver = & $podman version --format '{{.Client.Version}}' 2>$null | Select-Object -First 1
+    # `podman version` also queries the (absent) machine; --version is client only.
+    $verOut = (& $podman --version 2>&1) -join ' '
+    Write-Host "podman --version: $verOut"
+    $ver = if ($verOut -match '(\d+\.\d+\.\d+)') { $Matches[1] } else { '' }
     Test-That "Podman version $ver = bundled $($info.podmanVersion)" ("$ver" -eq $info.podmanVersion)
     $help = (& $podman machine init --help 2>&1) -join "`n"
+    $imageLines = @($help -split "`n" | Where-Object { $_ -like '*image*' })
+    if ($imageLines.Count -eq 0) { $imageLines = @($help -split "`n" | Select-Object -First 20) }
+    $imageLines | ForEach-Object { Write-Host "  help: $_" }
     Test-That 'podman machine init defaults to the golden image' ($help -match [regex]::Escape($image))
 }
 
