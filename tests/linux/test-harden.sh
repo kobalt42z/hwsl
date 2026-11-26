@@ -77,3 +77,6 @@ grep -q "^C: /mnt/c" /etc/fstab && fail "rogue drvfs line survived re-harden" ||
 [ "$(sha256sum < /tmp/m1)" = "$(sha256sum < /etc/golden-image/manifest.sha256)" ] && ok "re-harden restores manifest" || fail "manifest differs after re-harden"
 echo ALL-PASSED
 '
+
+echo "=== self-heal"
+"$engine" run --rm --network=none -v "$here:/t:ro" "$img" /bin/bash /t/selfheal-in-container.sh

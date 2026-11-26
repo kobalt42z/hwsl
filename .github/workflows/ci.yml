@@ -10,12 +10,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck post-init/harden.sh post-init/lib/* build/*.sh build/files/*.sh tests/linux/*.sh -e SC2016
+        run: shellcheck post-init/harden.sh post-init/lib/enterns post-init/lib/enterns-user post-init/lib/selfheal.sh build/*.sh build/files/*.sh tests/linux/*.sh -e SC2016
       - name: PSScriptAnalyzer
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $files = Get-ChildItem -Recurse -Include *.ps1 -Path post-init, compliance, tests
+          $files = Get-ChildItem -Recurse -Include *.ps1 -Path post-init, compliance, tests, installer
           $issues = $files | ForEach-Object {
             Invoke-ScriptAnalyzer -Path $_.FullName -Severity Error, Warning `
               -ExcludeRule PSAvoidUsingWriteHost, PSUseShouldProcessForStateChangingFunctions
@@ -36,5 +36,64 @@ jobs:
         run: |
           sudo tests/linux/make-test-base.sh /tmp/base.tar.zst podman
           sudo CA_FILE=/tmp/ca.pem build/build.sh --engine podman --base-tar /tmp/base.tar.zst --out /tmp/out
-      - name: harden.sh against simulated podman machine init
+      - name: harden.sh and self-heal against simulated podman machine init
         run: sudo tests/linux/test-harden.sh /tmp/out/podman-wsl-golden-*.tar.zst podman
+      - name: keep the test image for the installer job
+        run: sudo chmod -R a+r /tmp/out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: golden-test-image
+          path: |
+            /tmp/out/podman-wsl-golden-*.tar.zst
+            /tmp/out/podman-wsl-golden-*.json
+          retention-days: 3
+
+  installer:
+    # Builds the offline setup.exe around the stand-in test image and checks a
+    # silent install/uninstall on a Windows runner. WSL is not available on
+    # hosted runners, so no machine is created here.
+    needs: offline-build-test
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: golden-test-image
+          path: out
+      - name: install WiX 5
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet tool install --global wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw "dotnet tool install exited with $LASTEXITCODE" }
+          foreach ($ext in 'WixToolset.Util.wixext', 'WixToolset.BootstrapperApplications.wixext') {
+            $dll = Join-Path $HOME ".wix\extensions\$ext\5.0.2\wixext5\$ext.dll"
+            for ($i = 1; $i -le 3 -and -not (Test-Path $dll); $i++) {
+              wix extension add -g "$ext/5.0.2"
+              Write-Host "wix extension add $ext exited with $LASTEXITCODE"
+            }
+            if (-not (Test-Path $dll)) {
+              Get-ChildItem -Recurse (Join-Path $HOME '.wix\extensions') -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+              throw "extension $ext not installed: $dll"
+            }
+          }
+          wix extension list -g
+      - name: build installer
+        shell: pwsh
+        run: |
+          $img = Get-ChildItem out\podman-wsl-golden-*.tar.zst | Select-Object -First 1
+          .\installer\build-installer.ps1 -GoldenImage $img.FullName
+      - name: silent install, check, uninstall
+        shell: pwsh
+        run: .\tests\windows\Test-Installer.ps1 -Setup (Get-ChildItem out\installer\*-setup.exe | Select-Object -First 1).FullName
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installer-test-build
+          path: |
+            out/installer/*-setup.exe
+            out/installer/*.msi
+            out/installer/*.json
+            out/installer/*.log
+          retention-days: 7

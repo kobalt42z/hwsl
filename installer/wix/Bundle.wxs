@@ -1,0 +1,29 @@
+<!--
+  podman-wsl-golden-<version>-setup.exe - one self-contained, offline installer.
+  Chains, in order:
+    1. Microsoft WSL MSI (optional, only if built with -WslMsi; never uninstalled)
+    2. the official, signed Podman for Windows MSI, unmodified, per-machine, WSL provider
+    3. PodmanGoldenImage.msi (golden image, default-image config, compliance task)
+  All payloads are embedded: no network access at install time.
+
+  Preprocessor variables (-d): Version, PodmanMsi, GoldenMsi, WslMsi (optional)
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle Name="Podman WSL Golden Image" Manufacturer="Platform Engineering" Version="$(var.Version)"
+          UpgradeCode="b0d7f3a4-8e21-4c6b-9f0a-5d3e2c1b7a90" DisableModify="yes">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense" LicenseUrl="" SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Chain>
+<?ifdef WslMsi?>
+      <MsiPackage Id="Wsl" SourceFile="$(var.WslMsi)" Vital="yes" Permanent="yes" Visible="yes" />
+<?endif?>
+      <MsiPackage Id="Podman" SourceFile="$(var.PodmanMsi)" Vital="yes" ForcePerMachine="yes">
+        <!-- ForcePerMachine makes Burn pass ALLUSERS=1 (it may not be authored here). -->
+        <MsiProperty Name="MACHINE_PROVIDER" Value="wsl" />
+      </MsiPackage>
+      <MsiPackage Id="GoldenImage" SourceFile="$(var.GoldenMsi)" Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

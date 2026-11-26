@@ -42,6 +42,10 @@ SKIP_NUGET_FALLBACK=false
 FORCE=false
 DRY_RUN=false
 EXTRA_MOUNTS=()
+NO_WIN_MOUNTS=false
+FROM_HOST_ENV=false
+MOUNT_SOURCE=manual
+readonly HOST_ENV="$GI_DIR/host.env"
 
 log()  { printf '[harden] %s\n' "$*" >&2; }
 # same_file A B - true if both exist with identical content (no diffutils needed)
@@ -50,10 +54,14 @@ die()  { printf '[harden] ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-Usage: harden.sh --win-user NAME [options]
+Usage: harden.sh (--win-user NAME | --profile 'C:\Users\X' | --from-host-env | --no-windows-mounts) [options]
 
-Required (post-init):
+Mount source (post-init, pick one):
   --win-user NAME          Windows user name (used for C:\Users\NAME defaults)
+  --profile 'C:\Users\X'   see below; the user name is derived from it
+  --from-host-env          reuse the settings saved in /etc/golden-image/host.env
+                           by an earlier run (used by the boot-time self-heal)
+  --no-windows-mounts      fail closed: harden everything, mount no Windows folder
 
 Options:
   --profile 'C:\Users\X'   Exact %USERPROFILE% (case matters: Podman maps
@@ -81,6 +89,9 @@ while [[ $# -gt 0 ]]; do
         --skip-vs)             SKIP_VS=true; shift ;;
         --skip-nuget-fallback) SKIP_NUGET_FALLBACK=true; shift ;;
         --extra-mount)         EXTRA_MOUNTS+=("${2:?}"); shift 2 ;;
+        --no-windows-mounts)   NO_WIN_MOUNTS=true; shift ;;
+        --from-host-env)       FROM_HOST_ENV=true; shift ;;
+        --mount-source)        MOUNT_SOURCE="${2:?}"; shift 2 ;;
         --config)              CONFIG="${2:?}"; shift 2 ;;
         --stage)               STAGE="${2:?}"; shift 2 ;;
         --verify)              STAGE=verify; shift ;;
@@ -242,15 +253,53 @@ fstab_line() {
     printf '%s %s drvfs %s 0 0' "$(fstab_escape "$dev")" "$(fstab_escape "$target")" "$opts"
 }
 
+# Saved mount settings, so the boot-time self-heal can re-apply exactly what
+# the last explicit (or auto-detected) run used. Part of the manifest.
+load_host_env() {
+    [[ -f $HOST_ENV ]] || die "no $HOST_ENV to reuse"
+    # shellcheck source=/dev/null
+    source "$HOST_ENV"
+    PROFILE_PATH="${H_PROFILE:-}"; APPDATA_PATH="${H_APPDATA:-}"; VS_ROOT="${H_VS_ROOT:-}"
+    SKIP_VS="${H_SKIP_VS:-false}"; SKIP_NUGET_FALLBACK="${H_SKIP_NUGET_FALLBACK:-false}"
+    NO_WIN_MOUNTS="${H_NO_WIN_MOUNTS:-false}"; MOUNT_SOURCE="${H_MOUNT_SOURCE:-manual}"
+    EXTRA_MOUNTS=()
+    local IFS=';'
+    if [[ -n ${H_EXTRA_MOUNTS:-} ]]; then read -r -a EXTRA_MOUNTS <<<"$H_EXTRA_MOUNTS"; fi
+}
+
+save_host_env() {
+    local extra="" m
+    for m in "${EXTRA_MOUNTS[@]}"; do extra+="${extra:+;}$m"; done
+    write_file "$HOST_ENV" 0644 "# Written by harden.sh - mount settings of the last run.
+H_MOUNT_SOURCE=$(printf '%q' "$MOUNT_SOURCE")
+H_NO_WIN_MOUNTS=$(printf '%q' "$NO_WIN_MOUNTS")
+H_PROFILE=$(printf '%q' "$PROFILE_PATH")
+H_APPDATA=$(printf '%q' "$APPDATA_PATH")
+H_VS_ROOT=$(printf '%q' "$VS_ROOT")
+H_SKIP_VS=$(printf '%q' "$SKIP_VS")
+H_SKIP_NUGET_FALLBACK=$(printf '%q' "$SKIP_NUGET_FALLBACK")
+H_EXTRA_MOUNTS=$(printf '%q' "$extra")"
+}
+
 apply_fstab() {
-    [[ -n $WIN_USER ]] || die "--win-user is required"
-    [[ $WIN_USER =~ ^[A-Za-z0-9._\ -]+$ ]] || die "unexpected characters in --win-user"
-    local profile="${PROFILE_PATH:-C:\\Users\\$WIN_USER}"
-    local appdata="${APPDATA_PATH:-$profile\\AppData\\Roaming}"
-    local vsroot="${VS_ROOT:-C:\\Program Files\\Microsoft Visual Studio\\${VS_MAJOR_FOLDER}\\${VS_EDITION}}"
+    local entries=()
+    if $NO_WIN_MOUNTS; then
+        log "no Windows folders are mounted (--no-windows-mounts)"
+    else
+        if [[ -z $WIN_USER && -n $PROFILE_PATH ]]; then
+            WIN_USER="${PROFILE_PATH%\\}"; WIN_USER="${WIN_USER##*\\}"
+        fi
+        [[ -n $WIN_USER ]] || die "--win-user, --profile, --from-host-env or --no-windows-mounts is required"
+        [[ $WIN_USER =~ ^[A-Za-z0-9._\ -]+$ ]] || die "unexpected characters in the Windows user name: $WIN_USER"
+        PROFILE_PATH="${PROFILE_PATH:-C:\\Users\\$WIN_USER}"
+        APPDATA_PATH="${APPDATA_PATH:-$PROFILE_PATH\\AppData\\Roaming}"
+        VS_ROOT="${VS_ROOT:-C:\\Program Files\\Microsoft Visual Studio\\${VS_MAJOR_FOLDER}\\${VS_EDITION}}"
+    fi
+    local profile="$PROFILE_PATH" appdata="$APPDATA_PATH" vsroot="$VS_ROOT"
 
     # "WINPATH|mode" - the approved list, in a fixed order
-    local entries=(
+    if ! $NO_WIN_MOUNTS; then
+    entries=(
         "$profile\\source\\repos|rw"
         "$profile\\vsdbg|rw"
         "$profile\\.nuget\\packages|ro"
@@ -272,6 +321,7 @@ apply_fstab() {
         [[ $m =~ ^(.+):(ro|rw)$ ]] || die "--extra-mount must be 'C:\\path:ro' or ':rw': $m"
         entries+=("${BASH_REMATCH[1]}|${BASH_REMATCH[2]}")
     done
+    fi
 
     local block="$FSTAB_BEGIN" e targets=()
     for e in "${entries[@]}"; do
@@ -295,6 +345,7 @@ apply_fstab() {
     fi
 
     write_file /etc/fstab 0644 "${kept:+$kept$'\n'}$block"
+    $DRY_RUN || save_host_env
 
     if ! $DRY_RUN; then
         local t
@@ -438,6 +489,44 @@ AllowUsers ${MACHINE_USER} root"
 }
 
 # ----------------------------------------------------------------------------
+# Drop-in directories: files that were not in the image at build time and are
+# not written by this script are moved to a quarantine folder (a new
+# sudoers.d or registries.conf.d file is the easiest way around the policy).
+# ----------------------------------------------------------------------------
+readonly DROPIN_DIRS=(/etc/sudoers.d /etc/containers/registries.conf.d /etc/containers/containers.conf.d)
+readonly BASELINE="$GI_DIR/dropin-baseline"
+readonly QUARANTINE=/var/lib/golden-image/quarantine
+
+record_dropin_baseline() {
+    local d body=""
+    for d in "${DROPIN_DIRS[@]}"; do
+        [[ -d $d ]] || continue
+        body+="$(find "$d" -maxdepth 1 -type f | LC_ALL=C sort)"$'\n'
+    done
+    # files harden.sh itself manages are always allowed
+    body+="/etc/sudoers.d/10-golden-image
+/etc/containers/registries.conf.d/999-podman-machine.conf
+/etc/containers/containers.conf.d/50-golden-image.conf"
+    write_file "$BASELINE" 0644 "$(printf '%s\n' "$body" | sed '/^$/d' | LC_ALL=C sort -u)"
+}
+
+quarantine_unknown_dropins() {
+    [[ -f $BASELINE ]] || { log "no $BASELINE; skipping drop-in quarantine"; return 0; }
+    local d f dest
+    for d in "${DROPIN_DIRS[@]}"; do
+        [[ -d $d ]] || continue
+        while IFS= read -r f; do
+            grep -qxF -- "$f" "$BASELINE" && continue
+            if $DRY_RUN; then log "would quarantine $f"; continue; fi
+            dest="$QUARANTINE/$(date -u +%Y%m%dT%H%M%SZ)$f"
+            mkdir -p "$(dirname "$dest")"
+            mv -f -- "$f" "$dest"
+            log "QUARANTINED unapproved drop-in $f -> $dest"
+        done < <(find "$d" -maxdepth 1 -type f | LC_ALL=C sort)
+    done
+}
+
+# ----------------------------------------------------------------------------
 # 7. tamper evidence
 # ----------------------------------------------------------------------------
 manifest_files() {
@@ -457,9 +546,13 @@ manifest_files() {
         /etc/ssh/sshd_config.d/50-golden-image.conf
         /etc/yum.repos.d/*
         /usr/local/bin/enterns
+        /etc/systemd/system/golden-image-selfheal.service
+        /etc/systemd/system/multi-user.target.wants/golden-image-selfheal.service
         "$GI_LIBEXEC"/*
         "$GI_DIR"/version
         "$GI_DIR"/config.env
+        "$HOST_ENV"
+        "$BASELINE"
     )
     shopt -s nullglob
     for f in "${globs[@]}"; do
@@ -501,17 +594,20 @@ main() {
             apply_registries
             apply_containers_conf
             apply_sshd
+            record_dropin_baseline
             ;;
         post-init)
             if [[ ! -f /etc/containers/podman-machine ]] && ! $FORCE; then
                 die "/etc/containers/podman-machine missing: run podman machine init first (or --force)"
             fi
+            if $FROM_HOST_ENV; then load_host_env; fi
             apply_wsl_conf post-init
             apply_fstab
             apply_registries
             apply_containers_conf
             apply_privilege
             apply_sshd
+            quarantine_unknown_dropins
             $DRY_RUN || write_manifest
             log "done. Restart the machine: podman machine stop; podman machine start"
             ;;

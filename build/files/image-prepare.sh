@@ -7,6 +7,11 @@ log() { printf '[image-prepare] %s\n' "$*"; }
 
 chmod 0644 /etc/golden-image/config.env /etc/golden-image/version
 chmod 0755 /usr/local/libexec/golden-image/*
+chmod 0644 /etc/systemd/system/golden-image-selfheal.service
+# Enable the boot-time self-heal. Podman's configServices only adds/removes
+# its own links, so this one survives `podman machine init`.
+mkdir -p /etc/systemd/system/multi-user.target.wants
+ln -sf ../golden-image-selfheal.service /etc/systemd/system/multi-user.target.wants/golden-image-selfheal.service
 chmod 0644 "/etc/pki/ca-trust/source/anchors/${CA_NAME}.crt"
 
 # 5. corporate root CA into the system trust store
@@ -19,7 +24,7 @@ install -m 0644 /tmp/golden-build/golden-mirror.repo /etc/yum.repos.d/golden-mir
 
 # Tools Podman provisioning / runtime calls inside the distro
 # (pkg/machine/wsl/machine.go, stubber.go, declares.go, usermodenet.go).
-REQUIRED_CMDS=(sh bash rpm mkdir ln adduser useradd gpasswd chown chmod cat grep sed awk
+REQUIRED_CMDS=(sh bash tac rpm mkdir ln adduser useradd gpasswd chown chmod cat grep sed awk
                ps nsenter unshare nohup timeout tail touch mount umount sudo visudo
                sshd ssh-keygen systemctl podman sha256sum iptables update-ca-trust su)
 

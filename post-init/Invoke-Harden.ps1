@@ -20,6 +20,11 @@
 
 .PARAMETER ImagePath
     Path (or http(s):// or docker:// reference) of podman-wsl-golden-<ver>.tar.zst.
+    Default: the image installed by the setup (HKLM\SOFTWARE\PodmanGoldenImage ImagePath).
+
+    With the installer, this script is optional: the image's boot-time self-heal hardens a
+    machine created with a plain `podman machine init`. Use it to repair, to pass explicit
+    mount settings (redirected AppData, extra mounts), or to store a reference manifest.
 
 .PARAMETER ExpectedSha256
     Optional SHA-256 of the image file. Checked before init when ImagePath is a local file.
@@ -35,7 +40,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$ImagePath,
+    [string]$ImagePath,
     [string]$ExpectedSha256,
     [string]$MachineName = 'podman-machine-default',
     [string]$WindowsUserName = $env:USERNAME,
@@ -108,6 +113,11 @@ try {
         Stop-Precondition "Podman $podmanVersion does not match the image's Podman $ExpectedPodmanVersion."
     }
 
+    if (-not $ImagePath) {
+        $reg = Get-ItemProperty -Path 'HKLM:\SOFTWARE\PodmanGoldenImage' -ErrorAction SilentlyContinue
+        if ($reg -and $reg.PSObject.Properties['ImagePath']) { $ImagePath = $reg.ImagePath }
+        else { Stop-Precondition 'no -ImagePath and no installed golden image' }
+    }
     $isLocalImage = -not ($ImagePath -match '^(https?|docker)://')
     if ($isLocalImage) {
         if (-not (Test-Path -LiteralPath $ImagePath)) { Stop-Precondition "Image not found: $ImagePath" }
