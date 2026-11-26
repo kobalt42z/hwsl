@@ -61,10 +61,24 @@ jobs:
           name: golden-test-image
           path: out
       - name: install WiX 5
+        shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           dotnet tool install --global wix --version 5.0.2
-          wix extension add -g WixToolset.Util.wixext/5.0.2
-          wix extension add -g WixToolset.Bal.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { throw "dotnet tool install exited with $LASTEXITCODE" }
+          foreach ($ext in 'WixToolset.Util.wixext', 'WixToolset.Bal.wixext') {
+            $dll = Join-Path $HOME ".wix\extensions\$ext\5.0.2\wixext5\$ext.dll"
+            for ($i = 1; $i -le 3 -and -not (Test-Path $dll); $i++) {
+              wix extension add -g "$ext/5.0.2"
+              Write-Host "wix extension add $ext exited with $LASTEXITCODE"
+            }
+            if (-not (Test-Path $dll)) {
+              Get-ChildItem -Recurse (Join-Path $HOME '.wix\extensions') -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty FullName
+              throw "extension $ext not installed: $dll"
+            }
+          }
+          wix extension list -g
       - name: build installer
         shell: pwsh
         run: |
